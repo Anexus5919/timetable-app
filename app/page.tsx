@@ -120,7 +120,7 @@ export default function LandingPage() {
         className="absolute inset-0 z-[1]" 
         baseColor="rgba(255, 255, 255, 0.15)" 
         activeColor="rgba(255, 255, 255, 0.4)" 
-        dotSize={2}
+        dotSize={2.5}
         gap={32}
         proximity={120}
       />
