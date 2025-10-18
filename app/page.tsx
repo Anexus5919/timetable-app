@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react"; // Added useCallback
 import DotGrid from "../components/DotGrid";
 import Orb from "../components/Orb";
 import { easeInOut } from "framer-motion";
@@ -14,15 +14,15 @@ import { Label } from "@/components/ui/label";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 
 // Icon imports from lucide-react
-import { Menu, Zap, Clock, ShieldCheck, ArrowRight, Star, User as UserIcon, Layers, GanttChartSquare, LogOut } from "lucide-react"; // <-- Added LogOut
+import { Menu, Zap, Clock, ShieldCheck, ArrowRight, Star, User as UserIcon, Layers, GanttChartSquare, LogOut } from "lucide-react";
 
 // --- Authentication Modal ---
 import { motion, AnimatePresence } from "framer-motion";
 
 // --- FIREBASE IMPORTS ---
 import { auth } from "@/lib/firebaseClient";
-import { signInWithEmailAndPassword, User as FirebaseUser, signOut } from "firebase/auth"; // <-- Added User and signOut
-import { useAuth } from "@/lib/AuthContext"; // <-- Added AuthContext hook
+import { signInWithEmailAndPassword, User as FirebaseUser, signOut } from "firebase/auth";
+import { useAuth } from "@/lib/AuthContext";
 // --- END IMPORTS ---
 
 
@@ -33,6 +33,29 @@ function AuthModal({ isOpen, onClose, initialMode = 'signin' }: { isOpen: boolea
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+
+  // --- Callback to clear state ---
+  const clearFormState = useCallback(() => {
+      setError(null);
+      setName('');
+      setEmail('');
+      setPassword('');
+      setIsLoading(false); // Ensure loading is reset
+  }, []); // Empty dependency array means this function never changes
+
+
+  // Effect to handle mode changes and modal visibility
+  useEffect(() => {
+    if (isOpen) {
+        setIsSignIn(initialMode === 'signin');
+        // Clear state when modal opens or mode changes while open
+        clearFormState();
+    } else {
+        // Clear state when modal closes
+        clearFormState();
+    }
+  }, [initialMode, isOpen, clearFormState]); // Added clearFormState dependency
+
 
   const variants = {
     initial: (direction: number) => ({
@@ -50,67 +73,100 @@ function AuthModal({ isOpen, onClose, initialMode = 'signin' }: { isOpen: boolea
     e.preventDefault();
     setIsLoading(true);
     setError(null);
+    console.log(`Attempting ${isSignIn ? 'Sign In' : 'Sign Up'} with Email:`, email); // Log email on submit
 
     try {
       let user: FirebaseUser;
 
       if (isSignIn) {
         // --- SIGN IN Logic ---
+        console.log("Calling signInWithEmailAndPassword with:", { email: email, password: password ? '******' : 'EMPTY' }); // Log before sign in call
         const userCredential = await signInWithEmailAndPassword(auth, email, password);
+        console.log("Sign in successful for:", userCredential.user.uid); // Log success
         user = userCredential.user;
       } else {
         // --- SIGN UP Logic ---
+        console.log("Calling /api/auth/signup with:", { name, email, password: password ? '******' : 'EMPTY' }); // Log before sign up call
         const response = await fetch('/api/auth/signup', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name, email, password }),
         });
-        
+
         if (!response.ok) {
-          let errorMessage = 'Something went wrong';
+          let errorMessage = `Server error: ${response.status} ${response.statusText}`;
           try {
             const data = await response.json();
             errorMessage = data.error || errorMessage;
           } catch (parseError) {
-            // If JSON parsing fails, use the status text
-            errorMessage = `Server error: ${response.status} ${response.statusText}`;
+             console.error("Could not parse error response from signup:", parseError);
           }
           throw new Error(errorMessage);
         }
-        
+
         const data = await response.json();
         if (!data.success) throw new Error(data.error || 'Signup failed');
+        console.log("Sign up API successful, attempting client sign in...");
 
+        // Sign in after successful signup
+        console.log("Calling post-signup signInWithEmailAndPassword with:", { email: email, password: password ? '******' : 'EMPTY' }); // Log before post-signup sign in
         const userCredential = await signInWithEmailAndPassword(auth, email, password);
+        console.log("Client sign in successful after sign up.");
         user = userCredential.user;
       }
 
-      // --- SESSION LOGIC ---
+      // --- SESSION LOGIC (Common for both) ---
+      console.log("Getting ID token for user:", user.uid);
       const idToken = await user.getIdToken();
-      await fetch('/api/auth/session-login', {
+      console.log("ID token obtained, sending to session-login API");
+      const sessionResponse = await fetch('/api/auth/session-login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ idToken }),
       });
+
+      if (!sessionResponse.ok) {
+         let sessionErrorMsg = 'Failed to create session';
+         try {
+             const sessionErrorData = await sessionResponse.json();
+             sessionErrorMsg = sessionErrorData.error || sessionErrorMsg;
+         } catch(e) { /* Ignore parsing error */ }
+         console.error("Session login API error:", sessionErrorMsg);
+         throw new Error(sessionErrorMsg);
+      }
+      console.log("Session login API successful.");
       
-      onClose(false); // Close modal on success
+      onClose(false); // Close modal on complete success
 
     } catch (err: any) {
-      setError(err.message.replace('Firebase: ', ''));
+      console.error(`Auth handleSubmit ${isSignIn ? 'Sign In' : 'Sign Up'} Error:`, err); // Log the full error
+      // Provide more user-friendly messages for common auth errors
+      let displayError = err.message;
+       if (err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found') {
+          displayError = 'Invalid email or password. Please try again.';
+       } else if (err.code === 'auth/too-many-requests') {
+           displayError = 'Too many attempts. Please try again later.';
+       } else if (displayError.includes('Failed to create session')) {
+           displayError = 'Login succeeded, but failed to save session. Please try again.';
+       } else {
+           displayError = displayError.replace('Firebase: ', ''); // Clean up Firebase prefix
+       }
+      setError(displayError);
     }
     
     setIsLoading(false);
   };
   
+  // Use the clear state callback when toggling mode
   const toggleMode = () => {
     setIsSignIn(!isSignIn);
-    setError(null);
-    setName('');
-    setEmail('');
-    setPassword('');
+    clearFormState(); // Use the callback here
   }
 
   return (
+    // ... Rest of your AuthModal JSX remains the same ...
+    // Make sure the form and inputs still use the `email`, `password`, `name` state
+    // and the `onChange` handlers correctly update them.
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="relative overflow-hidden bg-slate-950/90 backdrop-blur-sm border-slate-800 text-white min-h-[420px] flex flex-col justify-center fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
         <AnimatePresence mode="wait" custom={isSignIn ? 1 : -1}>
@@ -126,7 +182,7 @@ function AuthModal({ isOpen, onClose, initialMode = 'signin' }: { isOpen: boolea
                 {isSignIn ? "Enter your credentials to access your dashboard." : "Get started in seconds."}
               </DialogDescription>
             </DialogHeader>
-            
+
             <form className="space-y-4 mt-4" onSubmit={handleSubmit}>
               {!isSignIn && (
                 <div className="space-y-2">
@@ -140,7 +196,7 @@ function AuthModal({ isOpen, onClose, initialMode = 'signin' }: { isOpen: boolea
               </div>
               <div className="space-y-2">
                 <Label htmlFor="password">Password</Label>
-                <Input id="password" type="password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} required />
+                <Input id="password" type="password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={6} /> {/* Keep minLength */}
               </div>
 
               {error && (<p className="text-sm text-red-400 text-center">{error}</p>)}
@@ -169,6 +225,7 @@ function AuthModal({ isOpen, onClose, initialMode = 'signin' }: { isOpen: boolea
 
 
 // --- Main Landing Page ---
+// No changes needed here from the previous version
 export default function LandingPage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState<'signin' | 'signup'>('signin');
@@ -184,11 +241,18 @@ export default function LandingPage() {
     }
   };
 
+  const openAuthModal = (mode: 'signin' | 'signup') => {
+    setModalMode(mode);
+    setIsModalOpen(true);
+  };
+
+
   return (
     <div className="min-h-screen w-full bg-black text-white relative overflow-x-hidden">
+      {/* ... Background elements ... */}
       <div className="absolute inset-0 z-[-2] bg-black bg-[radial-gradient(ellipse_80%_80%_at_50%_-20%,rgba(120,119,198,0.2),rgba(255,255,255,0))]"></div>
-      <DotGrid 
-        className="absolute inset-0 z-[1]" baseColor="rgba(255, 255, 255, 0.15)" activeColor="rgba(255, 255, 255, 0.4)" 
+      <DotGrid
+        className="absolute inset-0 z-[1]" baseColor="rgba(255, 255, 255, 0.15)" activeColor="rgba(255, 255, 255, 0.4)"
         dotSize={2.5} gap={32} proximity={120}
       />
 
@@ -196,6 +260,7 @@ export default function LandingPage() {
         {/* --- Header --- */}
         <header className="fixed top-0 left-0 right-0 z-50 w-full border-b border-slate-800/50 bg-black/30 backdrop-blur-sm">
           <div className="container mx-auto flex h-16 items-center justify-between px-4 md:px-6">
+             {/* ... Logo and Nav ... */}
             <div className="flex items-center gap-3">
               <h1 className="text-xl font-bold tracking-wider">SchedulAI</h1>
               <div className="w-8 h-8"><Orb className="w-full h-full" /></div>
@@ -203,37 +268,37 @@ export default function LandingPage() {
             <nav className="hidden md:flex items-center gap-6">
               {navLinks.map((link) => <a key={link} href={`#${link.toLowerCase().replace(' ', '-')}`} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{link}</a>)}
             </nav>
-            
-            {/* === Updated Header Buttons === */}
+
             <div className="hidden md:flex items-center gap-2">
-              {!isLoading && ( // Only show buttons when auth state is loaded
+              {!isLoading && (
                 <>
                   {user ? (
                     <>
-                      <Button variant="ghost">Dashboard</Button> {/* Link to dashboard */}
-                      <Button onClick={handleSignOut} size="icon" variant="outline" className="bg-transparent">
+                      <Button variant="ghost">Dashboard</Button>
+                      <Button onClick={handleSignOut} size="icon" variant="outline" className="bg-transparent" title="Sign Out">
                         <LogOut className="w-4 h-4" />
                       </Button>
                     </>
                   ) : (
                     <>
-                      <Button variant="ghost" onClick={() => { setModalMode('signin'); setIsModalOpen(true); }}>Sign In</Button>
-                      <Button onClick={() => { setModalMode('signup'); setIsModalOpen(true); }} className="bg-white text-black hover:bg-gray-200">Sign Up</Button>
+                      <Button variant="ghost" onClick={() => openAuthModal('signin')}>Sign In</Button>
+                      <Button onClick={() => openAuthModal('signup')} className="bg-white text-black hover:bg-gray-200">Sign Up</Button>
                     </>
                   )}
                 </>
               )}
+               {isLoading && <div className="text-sm text-slate-400">Loading...</div>}
             </div>
-            
+
             <div className="md:hidden">
+              {/* ... Mobile Sheet ... */}
               <Sheet>
                 <SheetTrigger asChild><Button variant="ghost" size="icon"><Menu /></Button></SheetTrigger>
                 <SheetContent side="right" className="bg-slate-950/90 backdrop-blur-sm border-slate-800 text-white">
                   <SheetHeader><SheetTitle className="text-xl font-bold tracking-wider">SchedulAI</SheetTitle></SheetHeader>
                   <nav className="flex flex-col gap-6 mt-10">
                     {navLinks.map((link) => (<a key={link} href={`#${link.toLowerCase().replace(' ', '-')}`} className="text-lg font-medium text-slate-300 hover:text-white transition-colors">{link}</a>))}
-                    
-                    {/* === Updated Sheet Buttons === */}
+
                     <div className="flex flex-col gap-4 pt-6 border-t border-slate-800">
                       {!isLoading && (
                         <>
@@ -244,12 +309,13 @@ export default function LandingPage() {
                             </>
                           ) : (
                             <>
-                              <Button variant="outline" className="bg-transparent" onClick={() => { setModalMode('signin'); setIsModalOpen(true); }}>Sign In</Button>
-                              <Button onClick={() => { setModalMode('signup'); setIsModalOpen(true); }}>Sign Up</Button>
+                              <Button variant="outline" className="bg-transparent" onClick={() => openAuthModal('signin')}>Sign In</Button>
+                              <Button onClick={() => openAuthModal('signup')}>Sign Up</Button>
                             </>
                           )}
                         </>
                       )}
+                      {isLoading && <div className="text-sm text-slate-400 text-center">Loading...</div>}
                     </div>
                   </nav>
                 </SheetContent>
@@ -259,20 +325,18 @@ export default function LandingPage() {
         </header>
 
         <main className="flex-grow">
-          {/* --- Hero Section --- */}
-          <section className="container mx-auto text-center px-4 pt-24 pb-20 sm:pt-32 sm:pb-28 relative">
+          {/* ... Hero and other sections ... */}
+           <section className="container mx-auto text-center px-4 pt-24 pb-20 sm:pt-32 sm:pb-28 relative">
             <h2 className="text-4xl md:text-6xl font-extrabold tracking-tighter bg-gradient-to-b from-slate-50 to-slate-400 bg-clip-text text-transparent">
               Automate Your School's Timetable with AI
             </h2>
             <div className="mt-6">
               <p className="max-w-2xl mx-auto text-lg text-slate-300">Save hundreds of hours, eliminate conflicts, and create perfectly optimized schedules in minutes.</p>
-              {/* === Button only shows if logged out === */}
               {!isLoading && !user && (
-                 <Button onClick={() => { setModalMode('signup'); setIsModalOpen(true); }} size="lg" className="mt-8 group px-8 py-6 text-base font-semibold shadow-blue-500/20 shadow-[0_8px_30px] transition-transform hover:scale-105">
+                 <Button onClick={() => openAuthModal('signup')} size="lg" className="mt-8 group px-8 py-6 text-base font-semibold shadow-blue-500/20 shadow-[0_8px_30px] transition-transform hover:scale-105">
                    Get Started for Free <ArrowRight className="w-4 h-4 ml-2 transition-transform group-hover:translate-x-1" />
                  </Button>
               )}
-              {/* === Button to dashboard if logged in === */}
                {!isLoading && user && (
                  <Button size="lg" className="mt-8 group px-8 py-6 text-base font-semibold shadow-blue-500/20 shadow-[0_8px_30px] transition-transform hover:scale-105">
                    Go to Dashboard <ArrowRight className="w-4 h-4 ml-2 transition-transform group-hover:translate-x-1" />
@@ -281,11 +345,9 @@ export default function LandingPage() {
             </div>
           </section>
 
-          {/* ... (Rest of your sections: Features, How It Works, Testimonials) ... */}
-          
-           {/* --- Features Section --- */}
           <section id="features" className="container mx-auto px-4 pb-24 sm:pb-32">
-            <h3 className="text-3xl font-bold text-center mb-2">Powerful Features</h3>
+            {/* ... FeatureCard components ... */}
+             <h3 className="text-3xl font-bold text-center mb-2">Powerful Features</h3>
             <p className="text-slate-400 text-center mb-12">Built for complexity, designed for simplicity.</p>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               <FeatureCard icon={<Zap className="w-8 h-8 text-blue-400" />} title="AI-Powered Automation" description="Our intelligent algorithm resolves conflicts and optimizes schedules in minutes, not weeks." />
@@ -294,9 +356,9 @@ export default function LandingPage() {
             </div>
           </section>
 
-          {/* --- How It Works Section --- */}
           <section id="how-it-works" className="bg-slate-900/50 py-24 sm:py-32">
-            <div className="container mx-auto px-4">
+             {/* ... HowItWorksStep components ... */}
+             <div className="container mx-auto px-4">
               <h3 className="text-3xl font-bold text-center mb-2">Get Your Perfect Timetable in 3 Easy Steps</h3>
               <p className="text-slate-400 text-center mb-16">From data import to final schedule in minutes.</p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-8 relative">
@@ -309,9 +371,9 @@ export default function LandingPage() {
             </div>
           </section>
 
-          {/* --- Testimonials Section --- */}
           <section id="testimonials" className="container mx-auto px-4 py-24 sm:py-32">
-            <h3 className="text-3xl font-bold text-center mb-2">Trusted by Educators</h3>
+             {/* ... TestimonialCard components ... */}
+             <h3 className="text-3xl font-bold text-center mb-2">Trusted by Educators</h3>
             <p className="text-slate-400 text-center mb-12">See what school administrators are saying about SchedulAI.</p>
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <TestimonialCard quote="SchedulAI saved us over 40 hours of manual work. The final timetable had zero conflicts. A complete game-changer." author="Jane Doe" title="Principal, Techville High" />
@@ -320,13 +382,13 @@ export default function LandingPage() {
             </div>
           </section>
 
-          {/* --- Final CTA Section (Conditional) --- */}
           {!isLoading && !user && (
             <section className="container mx-auto px-4 pb-24 sm:pb-32 text-center">
-              <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-12">
+               {/* ... Final CTA content ... */}
+               <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-12">
                 <h3 className="text-3xl font-bold mb-4">Ready to Revolutionize Your Scheduling?</h3>
                 <p className="text-slate-400 max-w-2xl mx-auto mb-8">Stop wrestling with spreadsheets. Start building intelligent, conflict-free timetables today.</p>
-                <Button onClick={() => { setModalMode('signup'); setIsModalOpen(true); }} size="lg" className="group px-8 py-6 text-base font-semibold shadow-blue-500/20 shadow-[0_8px_30px] transition-transform hover:scale-105">
+                <Button onClick={() => openAuthModal('signup')} size="lg" className="group px-8 py-6 text-base font-semibold shadow-blue-500/20 shadow-[0_8px_30px] transition-transform hover:scale-105">
                   Get Started for Free <ArrowRight className="w-4 h-4 ml-2 transition-transform group-hover:translate-x-1" />
                 </Button>
               </div>
@@ -344,8 +406,8 @@ export default function LandingPage() {
   );
 }
 
-// --- Sub-components (Keep these as they were) ---
-
+// --- Sub-components ---
+// ... (FeatureCard, HowItWorksStep, TestimonialCard remain unchanged) ...
 const FeatureCard = ({ icon, title, description }: { icon: React.ReactNode; title: string; description: string }) => (
   <Card className="bg-slate-900/50 border-slate-800 text-center p-6 transition-transform hover:-translate-y-2">
     <CardHeader>
